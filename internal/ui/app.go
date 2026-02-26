@@ -1130,10 +1130,21 @@ func (s *state) updateEstimate() {
 		return
 	}
 	attempts := s.scheme.EstimateAttempts(len(s.prefix))
-	keysPerSec := 500_000.0 * float64(s.cores)
-	if s.useGPU && s.gpuAvailable && s.scheme.SupportsGPU() {
-		keysPerSec += 100_000_000.0 // conservative GPU estimate
+
+	var keysPerSec float64
+	switch s.scheme.Network() {
+	case address.NetworkI2P:
+		keysPerSec = 500_000.0 * float64(s.cores)
+		if s.useGPU && s.gpuAvailable && s.scheme.SupportsGPU() {
+			keysPerSec += 100_000_000.0
+		}
+	case address.NetworkTorV3:
+		keysPerSec = 300_000.0 * float64(s.cores)
+		if s.useGPU && s.gpuAvailable && s.scheme.SupportsGPU() {
+			keysPerSec += 300_000.0 // GPU worker is CPU-precompute bound
+		}
 	}
+
 	seconds := attempts / keysPerSec
 	s.mu.Lock()
 	if seconds < 1 {
@@ -1169,10 +1180,23 @@ func (s *state) start(w *app.Window) {
 	resultCh, statsCh := gen.Start(ctx)
 
 	go func() {
+		attempts := s.scheme.EstimateAttempts(len(s.prefix))
 		for stats := range statsCh {
 			s.mu.Lock()
 			s.speed = fmt.Sprintf("%s keys/sec", formatNumber(stats.KeysPerSec))
 			s.checked = fmt.Sprintf("%s", formatUint(stats.Checked))
+			if stats.KeysPerSec > 0 {
+				remaining := attempts - float64(stats.Checked)
+				if remaining < 0 {
+					remaining = 0
+				}
+				secs := remaining / stats.KeysPerSec
+				if secs < 1 {
+					s.estimate = "< 1 second"
+				} else {
+					s.estimate = "~" + formatDuration(time.Duration(secs*float64(time.Second)))
+				}
+			}
 			s.mu.Unlock()
 			w.Invalidate()
 		}
@@ -1189,6 +1213,7 @@ func (s *state) start(w *app.Window) {
 			cores := s.cores
 			optedIn := s.telemetryOptedIn
 			s.mu.Unlock()
+			s.updateEstimate()
 			w.Invalidate()
 
 			if optedIn {
@@ -1211,12 +1236,13 @@ func (s *state) start(w *app.Window) {
 
 func (s *state) stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.running = false
 	s.status = "Stopped"
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.mu.Unlock()
+	s.updateEstimate()
 }
 
 func (s *state) save() {
