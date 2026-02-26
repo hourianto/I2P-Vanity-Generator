@@ -21,7 +21,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc pkg-config libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev libvulkan-dev
+          sudo apt-get install -y gcc pkg-config libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev libvulkan-dev ocl-icd-opencl-dev
 
       - name: Build
         env:
@@ -61,6 +61,16 @@ jobs:
           Get-Content winres\winres.json
         shell: powershell
 
+      - name: Generate OpenCL import library
+        run: |
+          $gccDir = Split-Path (Get-Command gcc).Source
+          $libDir = Join-Path (Split-Path $gccDir) "lib"
+          gendef C:\Windows\System32\OpenCL.dll
+          dlltool -d OpenCL.def -l libOpenCL.a
+          Copy-Item libOpenCL.a $libDir
+          Write-Host "Installed libOpenCL.a to $libDir"
+        shell: powershell
+
       - name: Generate Windows resources
         run: |
           go install github.com/tc-hib/go-winres@latest
@@ -71,7 +81,8 @@ jobs:
         run: |
           set GOOS=windows
           set GOARCH=amd64
-          set CGO_ENABLED=0
+          set CGO_ENABLED=1
+          set CC=gcc
           go build -ldflags "-H=windowsgui -s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}" -o "i2p-vanitygen-windows-amd64.exe" .
         shell: cmd
 
@@ -223,9 +234,9 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
           body: |
-            ## I2P Vanitygen ${{ github.ref_name }}
+            ## Vanity Address Generator ${{ github.ref_name }}
 
-            Generate vanity I2P addresses with a custom prefix.
+            Generate vanity I2P (.b32.i2p) and Tor v3 (.onion) addresses with a custom prefix. GPU accelerated on macOS (Metal) and Windows/Linux (OpenCL).
 
             ### Downloads
 
