@@ -23,7 +23,7 @@ type TorV3Scheme struct{}
 func (TorV3Scheme) Network() Network   { return NetworkTorV3 }
 func (TorV3Scheme) Suffix() string     { return ".onion" }
 func (TorV3Scheme) MaxPrefixLen() int  { return 56 }
-func (TorV3Scheme) SupportsGPU() bool  { return false }
+func (TorV3Scheme) SupportsGPU() bool  { return true }
 
 func (TorV3Scheme) ValidatePrefix(prefix string) error {
 	if len(prefix) == 0 {
@@ -199,6 +199,22 @@ func (c *TorV3Candidate) SaveKeys(dir string) error {
 // PublicKeyBytes returns the current 32-byte public key.
 func (c *TorV3Candidate) PublicKeyBytes() []byte {
 	return c.point.Bytes()
+}
+
+// Clone creates a deep copy of the candidate, preserving the current scalar/point
+// state. The clone can be advanced independently of the original.
+func (c *TorV3Candidate) Clone() *TorV3Candidate {
+	clone := &TorV3Candidate{
+		seed:      c.seed,
+		counter:   c.counter,
+		oneScalar: c.oneScalar, // shared, immutable
+		genPoint:  c.genPoint,  // shared, immutable
+	}
+	copy(clone.hashSuffix[:], c.hashSuffix[:])
+	// Deep copy mutable scalar and point
+	clone.scalar, _ = edwards25519.NewScalar().SetCanonicalBytes(c.scalar.Bytes())
+	clone.point, _ = new(edwards25519.Point).SetBytes(c.point.Bytes())
+	return clone
 }
 
 // ExpandedPrivateKey returns a 64-byte expanded Ed25519 private key

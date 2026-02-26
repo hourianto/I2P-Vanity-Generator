@@ -217,8 +217,8 @@ func TestTorV3SchemeInterface(t *testing.T) {
 	if s.MaxPrefixLen() != 56 {
 		t.Errorf("expected max prefix 56, got %d", s.MaxPrefixLen())
 	}
-	if s.SupportsGPU() {
-		t.Error("Tor v3 should not support GPU")
+	if !s.SupportsGPU() {
+		t.Error("Tor v3 should support GPU")
 	}
 
 	c, err := s.NewCandidate()
@@ -256,6 +256,67 @@ func TestI2PSchemeInterface(t *testing.T) {
 	addr := c.FullAddress()
 	if !strings.HasSuffix(addr, ".b32.i2p") {
 		t.Errorf("expected .b32.i2p suffix, got %s", addr)
+	}
+}
+
+func TestTorV3Clone(t *testing.T) {
+	c, err := NewTorV3Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance a few times so state isn't at zero
+	for i := 0; i < 10; i++ {
+		c.Advance()
+	}
+
+	clone := c.Clone()
+
+	// Clone should produce the same address
+	if c.Address() != clone.Address() {
+		t.Errorf("clone address mismatch: %s vs %s", c.Address(), clone.Address())
+	}
+
+	// Advancing original should not affect clone
+	c.Advance()
+	if c.Address() == clone.Address() {
+		t.Error("advancing original should not affect clone")
+	}
+
+	// Advancing clone independently
+	clone.Advance()
+	// Now both advanced once from the same point, should match
+	if c.Address() != clone.Address() {
+		t.Errorf("after both advance once, addresses should match: %s vs %s", c.Address(), clone.Address())
+	}
+}
+
+func TestTorV3BatchReconstruction(t *testing.T) {
+	c, err := NewTorV3Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Precompute N keys (simulating GPU batch precomputation)
+	const batchSize = 100
+	addresses := make([]string, batchSize)
+	snapshot := c.Clone()
+
+	for i := 0; i < batchSize; i++ {
+		addresses[i] = c.Address()
+		c.Advance()
+	}
+
+	// Verify that AdvanceBy(i) from snapshot reconstructs the correct address
+	for _, idx := range []int{0, 1, 10, 50, 99} {
+		reconstructed := snapshot.Clone()
+		if idx > 0 {
+			reconstructed.AdvanceBy(uint64(idx))
+		}
+		if reconstructed.Address() != addresses[idx] {
+			t.Errorf("batch reconstruction at index %d failed: got %s, want %s",
+				idx, reconstructed.Address(), addresses[idx])
+		}
 	}
 }
 

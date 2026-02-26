@@ -45,3 +45,34 @@ type workerImpl interface {
 	runBatch(counterStart uint64) (BatchResult, error)
 	close()
 }
+
+// TorV3WorkerConfig configures a GPU worker for Tor v3 vanity search.
+type TorV3WorkerConfig struct {
+	DeviceIndex int
+	Prefix      string
+	BatchSize   uint64 // number of pubkeys per GPU dispatch
+}
+
+// TorV3Worker represents an active GPU session for Tor v3 vanity checking.
+// CPU precomputes Ed25519 public keys, GPU checks SHA3-256 + base32 prefix.
+type TorV3Worker struct {
+	impl torV3WorkerImpl
+}
+
+// RunBatch dispatches a batch of precomputed pubkeys to the GPU for checking.
+// pubkeys must contain keyCount*32 bytes. Returns BatchResult where MatchCounter
+// is the index of the matching key in the pubkeys array.
+func (w *TorV3Worker) RunBatch(pubkeys []byte, keyCount uint64) (BatchResult, error) {
+	return w.impl.runBatch(pubkeys, keyCount)
+}
+
+// Close releases all GPU resources.
+func (w *TorV3Worker) Close() {
+	w.impl.close()
+}
+
+// torV3WorkerImpl is the platform-specific backend for Tor v3 GPU checking.
+type torV3WorkerImpl interface {
+	runBatch(pubkeys []byte, keyCount uint64) (BatchResult, error)
+	close()
+}

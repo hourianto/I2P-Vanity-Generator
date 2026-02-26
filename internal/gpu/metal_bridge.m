@@ -388,3 +388,299 @@ void metalFreeWorker(void* handle) {
         free(worker);
     }
 }
+
+// ==== Tor v3 SHA3-256 + base32 prefix check ====
+
+static NSString* const torV3ShaderSource = @"\n"
+"#include <metal_stdlib>\n"
+"using namespace metal;\n"
+"\n"
+"// Keccak-f[1600] round constants\n"
+"constant ulong RC[24] = {\n"
+"    0x0000000000000001UL, 0x0000000000008082UL, 0x800000000000808AUL,\n"
+"    0x8000000080008000UL, 0x000000000000808BUL, 0x0000000080000001UL,\n"
+"    0x8000000080008081UL, 0x8000000000008009UL, 0x000000000000008AUL,\n"
+"    0x0000000000000088UL, 0x0000000080008009UL, 0x000000008000000AUL,\n"
+"    0x000000008000808BUL, 0x800000000000008BUL, 0x8000000000008089UL,\n"
+"    0x8000000000008003UL, 0x8000000000008002UL, 0x8000000000000080UL,\n"
+"    0x000000000000800AUL, 0x800000008000000AUL, 0x8000000080008081UL,\n"
+"    0x8000000000008080UL, 0x0000000080000001UL, 0x8000000080008008UL\n"
+"};\n"
+"\n"
+"constant uint RHO[25] = {\n"
+"    0, 1, 62, 28, 27, 36, 44, 6, 55, 20,\n"
+"    3, 10, 43, 25, 39, 41, 45, 15, 21, 8,\n"
+"    18, 2, 61, 56, 14\n"
+"};\n"
+"\n"
+"constant int PI[25] = {\n"
+"    0, 10, 20, 5, 15, 16, 1, 11, 21, 6,\n"
+"    7, 17, 2, 12, 22, 23, 8, 18, 3, 13,\n"
+"    14, 24, 9, 19, 4\n"
+"};\n"
+"\n"
+"constant char B32T[32] = {\n"
+"    'a','b','c','d','e','f','g','h','i','j','k','l','m',\n"
+"    'n','o','p','q','r','s','t','u','v','w','x','y','z',\n"
+"    '2','3','4','5','6','7'\n"
+"};\n"
+"\n"
+"inline ulong rotl64(ulong x, uint n) {\n"
+"    return (n == 0) ? x : ((x << n) | (x >> (64 - n)));\n"
+"}\n"
+"\n"
+"struct TorV3Params {\n"
+"    uint key_count;\n"
+"    uint prefix_len;\n"
+"    char prefix[64];\n"
+"};\n"
+"\n"
+"kernel void torv3_check(\n"
+"    device const uchar* pubkeys [[buffer(0)]],\n"
+"    device const TorV3Params* params [[buffer(1)]],\n"
+"    device atomic_int* match_found [[buffer(2)]],\n"
+"    device ulong* match_index [[buffer(3)]],\n"
+"    uint gid [[thread_position_in_grid]]\n"
+") {\n"
+"    if (gid >= params->key_count) return;\n"
+"    if (atomic_load_explicit(match_found, memory_order_relaxed) != 0) return;\n"
+"\n"
+"    device const uchar* pk = pubkeys + gid * 32;\n"
+"\n"
+"    ulong state[25];\n"
+"    for (int i = 0; i < 25; i++) state[i] = 0;\n"
+"\n"
+"    state[0] = 0x63206e6f696e6f2eUL;\n"
+"    state[1] = 0x006d75736b636568UL | ((ulong)pk[0] << 56);\n"
+"    state[2] = (ulong)pk[1] | ((ulong)pk[2]<<8) | ((ulong)pk[3]<<16) | ((ulong)pk[4]<<24) |\n"
+"              ((ulong)pk[5]<<32) | ((ulong)pk[6]<<40) | ((ulong)pk[7]<<48) | ((ulong)pk[8]<<56);\n"
+"    state[3] = (ulong)pk[9] | ((ulong)pk[10]<<8) | ((ulong)pk[11]<<16) | ((ulong)pk[12]<<24) |\n"
+"              ((ulong)pk[13]<<32) | ((ulong)pk[14]<<40) | ((ulong)pk[15]<<48) | ((ulong)pk[16]<<56);\n"
+"    state[4] = (ulong)pk[17] | ((ulong)pk[18]<<8) | ((ulong)pk[19]<<16) | ((ulong)pk[20]<<24) |\n"
+"              ((ulong)pk[21]<<32) | ((ulong)pk[22]<<40) | ((ulong)pk[23]<<48) | ((ulong)pk[24]<<56);\n"
+"    state[5] = (ulong)pk[25] | ((ulong)pk[26]<<8) | ((ulong)pk[27]<<16) | ((ulong)pk[28]<<24) |\n"
+"              ((ulong)pk[29]<<32) | ((ulong)pk[30]<<40) | ((ulong)pk[31]<<48) | (0x03UL<<56);\n"
+"    state[6] = 0x0000000000000006UL;\n"
+"    state[16] = 0x8000000000000000UL;\n"
+"\n"
+"    for (int round = 0; round < 24; round++) {\n"
+"        ulong C[5];\n"
+"        for (int x = 0; x < 5; x++)\n"
+"            C[x] = state[x] ^ state[x+5] ^ state[x+10] ^ state[x+15] ^ state[x+20];\n"
+"        for (int x = 0; x < 5; x++) {\n"
+"            ulong D = C[(x+4)%5] ^ rotl64(C[(x+1)%5], 1);\n"
+"            for (int y = 0; y < 5; y++)\n"
+"                state[x + 5*y] ^= D;\n"
+"        }\n"
+"        ulong B[25];\n"
+"        for (int i = 0; i < 25; i++)\n"
+"            B[PI[i]] = rotl64(state[i], RHO[i]);\n"
+"        for (int y = 0; y < 5; y++) {\n"
+"            for (int x = 0; x < 5; x++)\n"
+"                state[x + 5*y] = B[x + 5*y] ^ (~B[((x+1)%5) + 5*y] & B[((x+2)%5) + 5*y]);\n"
+"        }\n"
+"        state[0] ^= RC[round];\n"
+"    }\n"
+"\n"
+"    uchar cksum0 = (uchar)(state[0]);\n"
+"    uchar cksum1 = (uchar)(state[0] >> 8);\n"
+"\n"
+"    uchar payload[35];\n"
+"    for (int i = 0; i < 32; i++) payload[i] = pk[i];\n"
+"    payload[32] = cksum0;\n"
+"    payload[33] = cksum1;\n"
+"    payload[34] = 0x03;\n"
+"\n"
+"    uint prefix_len = params->prefix_len;\n"
+"    uint bit_offset = 0;\n"
+"    bool match = true;\n"
+"    for (uint i = 0; i < prefix_len && match; i++) {\n"
+"        uint byte_idx = bit_offset / 8;\n"
+"        uint bit_idx = bit_offset % 8;\n"
+"        uint val;\n"
+"        if (bit_idx <= 3) {\n"
+"            val = (payload[byte_idx] >> (3 - bit_idx)) & 0x1f;\n"
+"        } else {\n"
+"            val = ((payload[byte_idx] << (bit_idx - 3)) | (payload[byte_idx + 1] >> (11 - bit_idx))) & 0x1f;\n"
+"        }\n"
+"        if (B32T[val] != params->prefix[i]) {\n"
+"            match = false;\n"
+"        }\n"
+"        bit_offset += 5;\n"
+"    }\n"
+"\n"
+"    if (match) {\n"
+"        int expected = 0;\n"
+"        if (atomic_compare_exchange_weak_explicit(match_found, &expected, 1,\n"
+"                memory_order_relaxed, memory_order_relaxed)) {\n"
+"            *match_index = (ulong)gid;\n"
+"        }\n"
+"    }\n"
+"}\n";
+
+// ---- Tor v3 Bridge implementation ----
+
+typedef struct {
+    id<MTLDevice> device;
+    id<MTLCommandQueue> queue;
+    id<MTLComputePipelineState> pipeline;
+    id<MTLBuffer> paramsBuf;
+    id<MTLBuffer> matchFoundBuf;
+    id<MTLBuffer> matchIndexBuf;
+    NSUInteger batchSize;
+    NSUInteger maxThreadsPerGroup;
+} MetalTorV3Worker;
+
+typedef struct __attribute__((packed)) {
+    uint32_t key_count;
+    uint32_t prefix_len;
+    char prefix[64];
+} TorV3Params;
+
+void* metalNewTorV3Worker(int deviceIndex, const char* prefix, int prefixLen,
+                          unsigned long batchSize) {
+    @autoreleasepool {
+        id<MTLDevice> device = nil;
+        NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
+        if (devices != nil && [devices count] > 0 && deviceIndex < (int)[devices count]) {
+            device = devices[deviceIndex];
+        } else {
+            device = MTLCreateSystemDefaultDevice();
+        }
+        if (device == nil) return NULL;
+
+        NSError* error = nil;
+        MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+        options.fastMathEnabled = YES;
+        id<MTLLibrary> library = [device newLibraryWithSource:torV3ShaderSource options:options error:&error];
+        if (library == nil) {
+            NSLog(@"Metal TorV3 shader compile error: %@", error);
+            return NULL;
+        }
+
+        id<MTLFunction> function = [library newFunctionWithName:@"torv3_check"];
+        if (function == nil) {
+            NSLog(@"Metal function 'torv3_check' not found");
+            return NULL;
+        }
+
+        id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+        if (pipeline == nil) {
+            NSLog(@"Metal TorV3 pipeline error: %@", error);
+            return NULL;
+        }
+
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        if (queue == nil) return NULL;
+
+        TorV3Params params;
+        memset(&params, 0, sizeof(params));
+        params.key_count = 0;
+        params.prefix_len = (uint32_t)prefixLen;
+        memcpy(params.prefix, prefix, prefixLen < 64 ? prefixLen : 63);
+
+        id<MTLBuffer> paramsBuf = [device newBufferWithBytes:&params
+                                                      length:sizeof(TorV3Params)
+                                                     options:MTLResourceStorageModeShared];
+
+        int32_t zero = 0;
+        id<MTLBuffer> matchFoundBuf = [device newBufferWithBytes:&zero
+                                                          length:sizeof(int32_t)
+                                                         options:MTLResourceStorageModeShared];
+
+        uint64_t zeroIdx = 0;
+        id<MTLBuffer> matchIndexBuf = [device newBufferWithBytes:&zeroIdx
+                                                          length:sizeof(uint64_t)
+                                                         options:MTLResourceStorageModeShared];
+
+        MetalTorV3Worker* worker = (MetalTorV3Worker*)calloc(1, sizeof(MetalTorV3Worker));
+        worker->device = device;
+        worker->queue = queue;
+        worker->pipeline = pipeline;
+        worker->paramsBuf = paramsBuf;
+        worker->matchFoundBuf = matchFoundBuf;
+        worker->matchIndexBuf = matchIndexBuf;
+        worker->batchSize = (NSUInteger)batchSize;
+        worker->maxThreadsPerGroup = [pipeline maxTotalThreadsPerThreadgroup];
+
+        CFRetain((__bridge CFTypeRef)device);
+        CFRetain((__bridge CFTypeRef)queue);
+        CFRetain((__bridge CFTypeRef)pipeline);
+        CFRetain((__bridge CFTypeRef)paramsBuf);
+        CFRetain((__bridge CFTypeRef)matchFoundBuf);
+        CFRetain((__bridge CFTypeRef)matchIndexBuf);
+
+        return worker;
+    }
+}
+
+unsigned long metalRunTorV3Batch(void* handle, const unsigned char* pubkeys,
+                                  unsigned long keyCount,
+                                  int* matchFound, unsigned long* matchIndex) {
+    @autoreleasepool {
+        MetalTorV3Worker* worker = (MetalTorV3Worker*)handle;
+        if (!worker) return 0;
+
+        // Create pubkeys buffer from input data
+        id<MTLBuffer> pubkeyBuf = [worker->device newBufferWithBytes:pubkeys
+                                                              length:keyCount * 32
+                                                             options:MTLResourceStorageModeShared];
+        if (pubkeyBuf == nil) return 0;
+
+        // Update params
+        TorV3Params* params = (TorV3Params*)[worker->paramsBuf contents];
+        params->key_count = (uint32_t)keyCount;
+
+        // Reset match_found
+        int32_t* found = (int32_t*)[worker->matchFoundBuf contents];
+        *found = 0;
+
+        id<MTLCommandBuffer> cmdBuf = [worker->queue commandBuffer];
+        if (cmdBuf == nil) return 0;
+
+        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        if (encoder == nil) return 0;
+
+        [encoder setComputePipelineState:worker->pipeline];
+        [encoder setBuffer:pubkeyBuf offset:0 atIndex:0];
+        [encoder setBuffer:worker->paramsBuf offset:0 atIndex:1];
+        [encoder setBuffer:worker->matchFoundBuf offset:0 atIndex:2];
+        [encoder setBuffer:worker->matchIndexBuf offset:0 atIndex:3];
+
+        NSUInteger threadGroupSize = worker->maxThreadsPerGroup;
+        if (threadGroupSize > 256) threadGroupSize = 256;
+        MTLSize gridSize = MTLSizeMake(keyCount, 1, 1);
+        MTLSize groupSize = MTLSizeMake(threadGroupSize, 1, 1);
+
+        [encoder dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
+        [encoder endEncoding];
+
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        if ([cmdBuf status] == MTLCommandBufferStatusError) {
+            NSLog(@"Metal TorV3 command buffer error: %@", [cmdBuf error]);
+            return 0;
+        }
+
+        *matchFound = *(int32_t*)[worker->matchFoundBuf contents];
+        *matchIndex = *(uint64_t*)[worker->matchIndexBuf contents];
+
+        return (unsigned long)keyCount;
+    }
+}
+
+void metalFreeTorV3Worker(void* handle) {
+    @autoreleasepool {
+        MetalTorV3Worker* worker = (MetalTorV3Worker*)handle;
+        if (!worker) return;
+
+        CFRelease((__bridge CFTypeRef)worker->matchIndexBuf);
+        CFRelease((__bridge CFTypeRef)worker->matchFoundBuf);
+        CFRelease((__bridge CFTypeRef)worker->paramsBuf);
+        CFRelease((__bridge CFTypeRef)worker->pipeline);
+        CFRelease((__bridge CFTypeRef)worker->queue);
+        CFRelease((__bridge CFTypeRef)worker->device);
+        free(worker);
+    }
+}

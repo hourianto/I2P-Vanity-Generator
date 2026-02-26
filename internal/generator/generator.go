@@ -72,7 +72,12 @@ func (g *Generator) Start(ctx context.Context) (<-chan Result, <-chan Stats) {
 		workerWg.Add(1)
 		go func() {
 			defer workerWg.Done()
-			g.gpuWorker(ctx, &totalChecked, &found, resultCh, startTime)
+			switch g.scheme.Network() {
+			case address.NetworkI2P:
+				g.gpuWorker(ctx, &totalChecked, &found, resultCh, startTime)
+			case address.NetworkTorV3:
+				g.torV3GPUWorker(ctx, &totalChecked, &found, resultCh, startTime)
+			}
 		}()
 	}
 
@@ -185,6 +190,68 @@ func (g *Generator) gpuWorker(ctx context.Context, totalChecked *atomic.Uint64, 
 				resultCh <- Result{
 					Candidate: i2pCand,
 					Address:   i2pCand.FullAddress(),
+					Attempts:  totalChecked.Load(),
+					Duration:  time.Since(startTime),
+				}
+			}
+			return
+		}
+	}
+}
+
+func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uint64, found *atomic.Bool, resultCh chan<- Result, startTime time.Time) {
+	cand, err := address.NewTorV3Candidate()
+	if err != nil {
+		return
+	}
+
+	batchSize := uint64(1 << 16) // 65536 keys per GPU dispatch
+	gpuW, err := gpu.NewTorV3Worker(gpu.TorV3WorkerConfig{
+		DeviceIndex: g.gpuDevice,
+		Prefix:      g.prefix,
+		BatchSize:   batchSize,
+	})
+	if err != nil {
+		return // GPU unavailable, CPU workers continue
+	}
+	defer gpuW.Close()
+
+	buf := make([]byte, batchSize*32)
+
+	for {
+		if found.Load() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Snapshot state before precomputation so we can reconstruct on match
+		snapshot := cand.Clone()
+
+		// CPU precompute: advance through keys and collect pubkeys
+		for i := uint64(0); i < batchSize; i++ {
+			copy(buf[i*32:(i+1)*32], cand.PublicKeyBytes())
+			cand.Advance()
+		}
+
+		// GPU checks all keys in parallel (SHA3-256 + base32 + prefix match)
+		result, err := gpuW.RunBatch(buf, batchSize)
+		if err != nil {
+			return // GPU error, stop GPU worker
+		}
+
+		totalChecked.Add(result.Checked)
+
+		if result.Found {
+			if found.CompareAndSwap(false, true) {
+				// Reconstruct matching candidate from snapshot
+				snapshot.AdvanceBy(result.MatchCounter)
+				resultCh <- Result{
+					Candidate: snapshot,
+					Address:   snapshot.FullAddress(),
 					Attempts:  totalChecked.Load(),
 					Duration:  time.Since(startTime),
 				}

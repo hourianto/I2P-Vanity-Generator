@@ -14,3 +14,8 @@ func ListDevices() ([]Device, error) { return nil, nil }
 func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	return nil, fmt.Errorf("GPU support not available (built without CGo)")
 }
+
+// NewTorV3Worker returns an error when GPU support is not compiled in.
+func NewTorV3Worker(cfg TorV3WorkerConfig) (*TorV3Worker, error) {
+	return nil, fmt.Errorf("GPU support not available (built without CGo)")
+}

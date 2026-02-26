@@ -91,3 +91,57 @@ func (w *metalWorker) close() {
 		w.handle = nil
 	}
 }
+
+// NewTorV3Worker creates a GPU worker for Tor v3 vanity checking using Metal.
+func NewTorV3Worker(cfg TorV3WorkerConfig) (*TorV3Worker, error) {
+	if !Available() {
+		return nil, fmt.Errorf("no Metal GPU available")
+	}
+
+	cPrefix := C.CString(cfg.Prefix)
+	defer C.free(unsafe.Pointer(cPrefix))
+
+	handle := C.metalNewTorV3Worker(
+		C.int(cfg.DeviceIndex),
+		cPrefix,
+		C.int(len(cfg.Prefix)),
+		C.ulong(cfg.BatchSize),
+	)
+	if handle == nil {
+		return nil, fmt.Errorf("failed to create Metal Tor v3 compute pipeline")
+	}
+
+	return &TorV3Worker{
+		impl: &metalTorV3Worker{handle: handle},
+	}, nil
+}
+
+type metalTorV3Worker struct {
+	handle unsafe.Pointer
+}
+
+func (w *metalTorV3Worker) runBatch(pubkeys []byte, keyCount uint64) (BatchResult, error) {
+	var matchFound C.int
+	var matchIndex C.ulong
+
+	checked := C.metalRunTorV3Batch(w.handle,
+		(*C.uchar)(unsafe.Pointer(&pubkeys[0])),
+		C.ulong(keyCount),
+		&matchFound, &matchIndex)
+	if checked == 0 {
+		return BatchResult{}, fmt.Errorf("Metal Tor v3 kernel execution failed")
+	}
+
+	return BatchResult{
+		Found:        matchFound != 0,
+		MatchCounter: uint64(matchIndex),
+		Checked:      uint64(checked),
+	}, nil
+}
+
+func (w *metalTorV3Worker) close() {
+	if w.handle != nil {
+		C.metalFreeTorV3Worker(w.handle)
+		w.handle = nil
+	}
+}
