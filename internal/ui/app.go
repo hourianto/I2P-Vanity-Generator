@@ -27,7 +27,6 @@ import (
 	"github.com/go-i2p/i2p-vanitygen/internal/config"
 	"github.com/go-i2p/i2p-vanitygen/internal/generator"
 	"github.com/go-i2p/i2p-vanitygen/internal/gpu"
-	"github.com/go-i2p/i2p-vanitygen/internal/telemetry"
 	"github.com/go-i2p/i2p-vanitygen/internal/updater"
 	"github.com/go-i2p/i2p-vanitygen/internal/version"
 )
@@ -56,9 +55,6 @@ type state struct {
 	useGPU       bool
 	gpuDevice    int
 
-	showOptIn        bool
-	telemetryOptedIn bool
-
 	// Auto-update
 	updateAvailable   bool
 	updateRelease     *updater.Release
@@ -85,8 +81,6 @@ func Run(w *app.Window) error {
 		gpuToggle        widget.Bool
 		netI2PBtn        widget.Clickable
 		netTorBtn        widget.Clickable
-		optInYesBtn      widget.Clickable
-		optInNoBtn       widget.Clickable
 		updateBannerBtn  widget.Clickable
 		updateDismissBtn widget.Clickable
 		updateInstallBtn widget.Clickable
@@ -112,8 +106,6 @@ func Run(w *app.Window) error {
 		scheme:           initScheme,
 		status:           "Idle",
 		estimate:         "Awaiting input...",
-		showOptIn:        !cfg.TelemetryAsked,
-		telemetryOptedIn: cfg.TelemetryOptedIn,
 	}
 
 	// Detect GPU devices
@@ -162,18 +154,6 @@ func Run(w *app.Window) error {
 			gtx := app.NewContext(&ops, e)
 			paint.Fill(gtx.Ops, colorBg)
 
-			// Handle opt-in buttons before other UI
-			if optInYesBtn.Clicked(gtx) {
-				s.showOptIn = false
-				s.telemetryOptedIn = true
-				go config.Save(&config.Config{TelemetryAsked: true, TelemetryOptedIn: true})
-			}
-			if optInNoBtn.Clicked(gtx) {
-				s.showOptIn = false
-				s.telemetryOptedIn = false
-				go config.Save(&config.Config{TelemetryAsked: true, TelemetryOptedIn: false})
-			}
-
 			// Handle update banner buttons
 			if updateBannerBtn.Clicked(gtx) {
 				s.mu.Lock()
@@ -190,9 +170,7 @@ func Run(w *app.Window) error {
 				s.mu.Unlock()
 				if tag != "" {
 					go config.Save(&config.Config{
-						TelemetryAsked:   cfg.TelemetryAsked,
-						TelemetryOptedIn: cfg.TelemetryOptedIn,
-						SkippedVersion:   tag,
+						SkippedVersion: tag,
 					})
 				}
 			}
@@ -332,11 +310,6 @@ func Run(w *app.Window) error {
 
 			layoutApp(gtx, th, s, &prefixEditor, &startBtn, &saveBtn, &coreSlider, maxCores, &gpuToggle, &netI2PBtn, &netTorBtn, &updateBannerBtn, &updateDismissBtn, &scrollList)
 
-			// Draw opt-in overlay on top
-			if s.showOptIn {
-				layoutOptInOverlay(gtx, th, &optInYesBtn, &optInNoBtn)
-			}
-
 			// Draw update overlay on top
 			s.mu.Lock()
 			showUpdate := s.showUpdateOverlay
@@ -443,62 +416,6 @@ func layoutHeader(gtx layout.Context, th *material.Theme) layout.Dimensions {
 			})
 		}),
 	)
-}
-
-func layoutOptInOverlay(gtx layout.Context, th *material.Theme, yesBtn, noBtn *widget.Clickable) layout.Dimensions {
-	// Semi-transparent scrim over entire window
-	paint.Fill(gtx.Ops, colorOverlay)
-
-	return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		maxW := gtx.Dp(380)
-		if gtx.Constraints.Max.X > maxW {
-			gtx.Constraints.Max.X = maxW
-		}
-		gtx.Constraints.Min.X = gtx.Constraints.Max.X
-
-		return cardWithBorder(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.H6(th, "Anonymous Telemetry")
-					lbl.Color = colorText
-					lbl.Font.Weight = font.SemiBold
-					lbl.Alignment = text.Middle
-					return lbl.Layout(gtx)
-				}),
-				layout.Rigid(vspace(12)),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Body2(th, "Help improve this tool by anonymously sharing generation times.\n\nOnly prefix length, duration, core count, and attempt count are sent. No keys, addresses, or personal data is ever collected.")
-					lbl.Color = colorTextBody
-					lbl.Alignment = text.Middle
-					return lbl.Layout(gtx)
-				}),
-				layout.Rigid(vspace(20)),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					gtx.Constraints.Min.X = gtx.Constraints.Max.X
-					return layout.Flex{}.Layout(gtx,
-						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							btn := material.Button(th, noBtn, "No Thanks")
-							btn.Background = color.NRGBA{R: 0x40, G: 0x40, B: 0x40, A: 0xff}
-							btn.Color = colorTextBody
-							btn.Inset = layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10)}
-							return btn.Layout(gtx)
-						}),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return layout.Spacer{Width: unit.Dp(12)}.Layout(gtx)
-						}),
-						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							btn := material.Button(th, yesBtn, "Sure!")
-							btn.Background = colorAccent
-							btn.Color = color.NRGBA{A: 0xff}
-							btn.Font.Weight = font.SemiBold
-							btn.Inset = layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10)}
-							return btn.Layout(gtx)
-						}),
-					)
-				}),
-			)
-		})
-	})
 }
 
 func layoutUpdateBanner(gtx layout.Context, th *material.Theme, rel *updater.Release, updateBtn, dismissBtn *widget.Clickable) layout.Dimensions {
@@ -1209,27 +1126,9 @@ func (s *state) start(w *app.Window) {
 			s.result = result.Address
 			s.status = fmt.Sprintf("Found in %s (%s attempts)", formatDuration(result.Duration), formatUint(result.Attempts))
 			s.running = false
-			prefixLen := len(s.prefix)
-			cores := s.cores
-			optedIn := s.telemetryOptedIn
 			s.mu.Unlock()
 			s.updateEstimate()
 			w.Invalidate()
-
-			if optedIn {
-				payload := telemetry.Payload{
-					PrefixLength:    prefixLen,
-					DurationSeconds: result.Duration.Seconds(),
-					CoresUsed:       cores,
-					Attempts:        result.Attempts,
-					Network:         s.network.String(),
-					GPUUsed:         s.useGPU && s.gpuAvailable && s.scheme.SupportsGPU(),
-				}
-				if payload.GPUUsed && len(s.gpuDevices) > 0 {
-					payload.GPUName = s.gpuDevices[s.gpuDevice].Name
-				}
-				telemetry.Submit(payload)
-			}
 		}
 	}()
 }

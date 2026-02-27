@@ -14,15 +14,13 @@ const (
 
 // Config holds persistent user preferences.
 type Config struct {
-	TelemetryAsked   bool   `json:"telemetry_asked"`
-	TelemetryOptedIn bool   `json:"telemetry_opted_in"`
-	SkippedVersion   string `json:"skipped_version,omitempty"`
+	SkippedVersion string `json:"skipped_version,omitempty"`
 	GPUEnabled       *bool  `json:"gpu_enabled,omitempty"`
 	Network          string `json:"network,omitempty"`
 }
 
 // Load reads the config from disk. If the file does not exist,
-// it returns a zero-value Config (TelemetryAsked == false).
+// it returns a zero-value Config.
 func Load() *Config {
 	p, err := path()
 	if err != nil {

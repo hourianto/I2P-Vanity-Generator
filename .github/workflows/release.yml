@@ -101,61 +101,52 @@ jobs:
   build-macos:
     runs-on: [self-hosted, macOS]
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goarch: arm64
-            cc: clang
-          - goarch: amd64
-            cc: clang -arch x86_64
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Build
         env:
           GOOS: darwin
-          GOARCH: ${{ matrix.goarch }}
+          GOARCH: arm64
           CGO_ENABLED: 1
-          CC: ${{ matrix.cc }}
+          CC: clang
         run: |
           LDFLAGS="-s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}"
-          go build -ldflags "${LDFLAGS}" -o "i2p-vanitygen-darwin-${{ matrix.goarch }}" .
+          go build -ldflags "${LDFLAGS}" -o "i2p-vanitygen-darwin-arm64" .
 
       - name: Unlock keychain
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
-          # Keep keychain unlocked for the duration of the job
           security set-keychain-settings -t 3600 ~/Library/Keychains/login.keychain-db
-          # Verify signing identity is accessible
           security find-identity -v -p codesigning
 
       - name: Sign binary
         run: |
-          # Use the SHA-1 hash from find-identity to avoid quoting issues with the name
           IDENTITY_HASH=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk '{print $2}')
           echo "Using identity: $IDENTITY_HASH"
           codesign --force --options runtime --timestamp \
             --sign "$IDENTITY_HASH" \
-            "i2p-vanitygen-darwin-${{ matrix.goarch }}"
+            "i2p-vanitygen-darwin-arm64"
           echo "Verifying signature..."
-          codesign -dv --verbose=2 "i2p-vanitygen-darwin-${{ matrix.goarch }}"
+          codesign -dv --verbose=2 "i2p-vanitygen-darwin-arm64"
 
       - name: Notarize binary
         run: |
-          zip "i2p-vanitygen-darwin-${{ matrix.goarch }}.zip" "i2p-vanitygen-darwin-${{ matrix.goarch }}"
-          xcrun notarytool submit "i2p-vanitygen-darwin-${{ matrix.goarch }}.zip" \
+          zip "i2p-vanitygen-darwin-arm64.zip" "i2p-vanitygen-darwin-arm64"
+          xcrun notarytool submit "i2p-vanitygen-darwin-arm64.zip" \
             --keychain-profile "i2p-notary" --wait
           echo "Notarization complete"
+
+      - name: Staple notarization ticket
+        run: xcrun stapler staple "i2p-vanitygen-darwin-arm64"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: i2p-vanitygen-darwin-${{ matrix.goarch }}
-          path: i2p-vanitygen-darwin-${{ matrix.goarch }}
+          name: i2p-vanitygen-darwin-arm64
+          path: i2p-vanitygen-darwin-arm64
 
   sign-linux:
     needs: build-linux
@@ -210,7 +201,6 @@ jobs:
             artifacts/i2p-vanitygen-windows-amd64.exe
             artifacts/i2p-vanitygen-linux-amd64
             artifacts/i2p-vanitygen-darwin-arm64
-            artifacts/i2p-vanitygen-darwin-amd64
 
       - name: Parse VirusTotal results
         id: vt_links
@@ -244,7 +234,6 @@ jobs:
             |----------|-------------|------|--------|
             | Windows | amd64 | `i2p-vanitygen-windows-amd64.exe` | Authenticode |
             | macOS | arm64 (Apple Silicon) | `i2p-vanitygen-darwin-arm64` | Notarized |
-            | macOS | amd64 (Intel) | `i2p-vanitygen-darwin-amd64` | Notarized |
             | Linux | amd64 | `i2p-vanitygen-linux-amd64` | PKCS#7 (`.p7s`) |
 
             ### VirusTotal Analysis
