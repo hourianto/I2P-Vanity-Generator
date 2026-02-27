@@ -139,9 +139,6 @@ jobs:
             --keychain-profile "i2p-notary" --wait
           echo "Notarization complete"
 
-      - name: Staple notarization ticket
-        run: xcrun stapler staple "i2p-vanitygen-darwin-arm64"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
