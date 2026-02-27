@@ -6,6 +6,33 @@
 #include <string.h>
 #include "metal_bridge.h"
 
+static NSUInteger bestThreadGroupSize(NSUInteger maxThreadsPerGroup, NSUInteger threadExecutionWidth) {
+    if (maxThreadsPerGroup == 0) return 1;
+    NSUInteger groupSize = maxThreadsPerGroup;
+    if (groupSize > 256) groupSize = 256;
+    if (threadExecutionWidth > 0) {
+        groupSize = (groupSize / threadExecutionWidth) * threadExecutionWidth;
+        if (groupSize == 0) groupSize = threadExecutionWidth;
+    }
+    return groupSize > 0 ? groupSize : 1;
+}
+
+static inline uint32_t rotr32_host(uint32_t x, uint32_t n) {
+    return (x >> n) | (x << (32 - n));
+}
+
+static inline uint32_t sig0_host(uint32_t x) {
+    return rotr32_host(x, 7) ^ rotr32_host(x, 18) ^ (x >> 3);
+}
+
+static inline uint32_t sig1_host(uint32_t x) {
+    return rotr32_host(x, 17) ^ rotr32_host(x, 19) ^ (x >> 10);
+}
+
+static inline uint32_t readBE32Host(const unsigned char* p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
 // Embedded Metal shader source (SHA-256 + base32 prefix check)
 static NSString* const shaderSource = @"\n"
 "#include <metal_stdlib>\n"
@@ -47,25 +74,16 @@ static NSString* const shaderSource = @"\n"
 "    '2','3','4','5','6','7'\n"
 "};\n"
 "\n"
-"// Read a big-endian uint32 from a byte array\n"
-"inline uint read_be32(const device uchar* p, uint offset) {\n"
-"    return ((uint)p[offset] << 24) | ((uint)p[offset+1] << 16) |\n"
-"           ((uint)p[offset+2] << 8) | (uint)p[offset+3];\n"
-"}\n"
-"inline uint read_be32_local(thread uchar* p, uint offset) {\n"
-"    return ((uint)p[offset] << 24) | ((uint)p[offset+1] << 16) |\n"
-"           ((uint)p[offset+2] << 8) | (uint)p[offset+3];\n"
-"}\n"
-"\n"
 "struct VanityParams {\n"
 "    ulong counter_base;\n"
 "    uint prefix_len;\n"
 "    char prefix[64];\n"
+"    uint block0_words[14];\n"
 "};\n"
 "\n"
 "kernel void vanity_search(\n"
-"    device const uchar* dest_template [[buffer(0)]],\n"
-"    device const VanityParams* params [[buffer(1)]],\n"
+"    constant VanityParams* params [[buffer(0)]],\n"
+"    constant uint* static_w [[buffer(1)]],\n"
 "    device atomic_int* match_found [[buffer(2)]],\n"
 "    device ulong* match_counter [[buffer(3)]],\n"
 "    uint gid [[thread_position_in_grid]]\n"
@@ -75,69 +93,53 @@ static NSString* const shaderSource = @"\n"
 "    // Early exit if another thread already found a match\n"
 "    if (atomic_load_explicit(match_found, memory_order_relaxed) != 0) return;\n"
 "    \n"
-"    // Copy destination template to thread-private memory\n"
-"    uchar dest[448]; // 391 bytes + padding to 7*64=448 for SHA-256\n"
-"    for (uint i = 0; i < 391; i++) {\n"
-"        dest[i] = dest_template[i];\n"
-"    }\n"
-"    \n"
-"    // Write counter (little-endian uint64) into bytes 0-7\n"
-"    dest[0] = (uchar)(counter);\n"
-"    dest[1] = (uchar)(counter >> 8);\n"
-"    dest[2] = (uchar)(counter >> 16);\n"
-"    dest[3] = (uchar)(counter >> 24);\n"
-"    dest[4] = (uchar)(counter >> 32);\n"
-"    dest[5] = (uchar)(counter >> 40);\n"
-"    dest[6] = (uchar)(counter >> 48);\n"
-"    dest[7] = (uchar)(counter >> 56);\n"
-"    \n"
-"    // SHA-256 padding: message is 391 bytes = 3128 bits\n"
-"    // Pad: 0x80, then zeros, then 64-bit big-endian length\n"
-"    // Total padded: 7 * 64 = 448 bytes\n"
-"    dest[391] = 0x80;\n"
-"    for (uint i = 392; i < 440; i++) {\n"
-"        dest[i] = 0;\n"
-"    }\n"
-"    // Length in bits = 391 * 8 = 3128 = 0x0C38\n"
-"    dest[440] = 0; dest[441] = 0; dest[442] = 0; dest[443] = 0;\n"
-"    dest[444] = 0; dest[445] = 0; dest[446] = 0x0C; dest[447] = 0x38;\n"
-"    \n"
 "    // SHA-256 compression\n"
 "    uint h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;\n"
 "    uint h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;\n"
 "    \n"
-"    // Process 7 blocks of 64 bytes\n"
-"    for (uint block = 0; block < 7; block++) {\n"
-"        uint w[64];\n"
-"        uint base = block * 64;\n"
-"        \n"
-"        // Load message schedule W[0..15]\n"
-"        for (uint i = 0; i < 16; i++) {\n"
-"            w[i] = read_be32_local(dest, base + i * 4);\n"
-"        }\n"
-"        \n"
-"        // Extend W[16..63]\n"
-"        for (uint i = 16; i < 64; i++) {\n"
-"            w[i] = sig1(w[i-2]) + w[i-7] + sig0(w[i-15]) + w[i-16];\n"
-"        }\n"
-"        \n"
-"        // Compression\n"
-"        uint a = h0, b = h1, c = h2, d = h3;\n"
-"        uint e = h4, f = h5, g = h6, h = h7;\n"
-"        \n"
+"    // Block 0 has dynamic counter bytes and static words from params\n"
+"    uint w[64];\n"
+"    uint c0 = (uint)(counter & 0xFFFFFFFFUL);\n"
+"    uint c1 = (uint)(counter >> 32);\n"
+"    w[0] = ((c0 & 0x000000FFu) << 24) | ((c0 & 0x0000FF00u) << 8) |\n"
+"           ((c0 & 0x00FF0000u) >> 8)  | ((c0 & 0xFF000000u) >> 24);\n"
+"    w[1] = ((c1 & 0x000000FFu) << 24) | ((c1 & 0x0000FF00u) << 8) |\n"
+"           ((c1 & 0x00FF0000u) >> 8)  | ((c1 & 0xFF000000u) >> 24);\n"
+"    for (uint i = 0; i < 14; i++) {\n"
+"        w[i + 2] = params->block0_words[i];\n"
+"    }\n"
+"    for (uint i = 16; i < 64; i++) {\n"
+"        w[i] = sig1(w[i-2]) + w[i-7] + sig0(w[i-15]) + w[i-16];\n"
+"    }\n"
+"    \n"
+"    uint a = h0, b = h1, c = h2, d = h3;\n"
+"    uint e = h4, f = h5, g = h6, h = h7;\n"
+"    for (uint i = 0; i < 64; i++) {\n"
+"        uint t1 = h + ep1(e) + ch(e, f, g) + K[i] + w[i];\n"
+"        uint t2 = ep0(a) + maj(a, b, c);\n"
+"        h = g; g = f; f = e; e = d + t1;\n"
+"        d = c; c = b; b = a; a = t1 + t2;\n"
+"    }\n"
+"    h0 += a; h1 += b; h2 += c; h3 += d;\n"
+"    h4 += e; h5 += f; h6 += g; h7 += h;\n"
+"    \n"
+"    // Blocks 1..6 use pre-expanded static schedules from static_w\n"
+"    for (uint block = 0; block < 6; block++) {\n"
+"        constant uint* ws = static_w + block * 64;\n"
+"        a = h0; b = h1; c = h2; d = h3;\n"
+"        e = h4; f = h5; g = h6; h = h7;\n"
 "        for (uint i = 0; i < 64; i++) {\n"
-"            uint t1 = h + ep1(e) + ch(e, f, g) + K[i] + w[i];\n"
+"            uint t1 = h + ep1(e) + ch(e, f, g) + K[i] + ws[i];\n"
 "            uint t2 = ep0(a) + maj(a, b, c);\n"
 "            h = g; g = f; f = e; e = d + t1;\n"
 "            d = c; c = b; b = a; a = t1 + t2;\n"
 "        }\n"
-"        \n"
 "        h0 += a; h1 += b; h2 += c; h3 += d;\n"
 "        h4 += e; h5 += f; h6 += g; h7 += h;\n"
 "    }\n"
 "    \n"
 "    // Extract hash bytes (only need enough for prefix check)\n"
-"    uchar hash[32];\n"
+"    uchar hash[33];\n"
 "    hash[0] = (h0 >> 24); hash[1] = (h0 >> 16); hash[2] = (h0 >> 8); hash[3] = h0;\n"
 "    hash[4] = (h1 >> 24); hash[5] = (h1 >> 16); hash[6] = (h1 >> 8); hash[7] = h1;\n"
 "    hash[8] = (h2 >> 24); hash[9] = (h2 >> 16); hash[10] = (h2 >> 8); hash[11] = h2;\n"
@@ -146,6 +148,7 @@ static NSString* const shaderSource = @"\n"
 "    hash[20] = (h5 >> 24); hash[21] = (h5 >> 16); hash[22] = (h5 >> 8); hash[23] = h5;\n"
 "    hash[24] = (h6 >> 24); hash[25] = (h6 >> 16); hash[26] = (h6 >> 8); hash[27] = h6;\n"
 "    hash[28] = (h7 >> 24); hash[29] = (h7 >> 16); hash[30] = (h7 >> 8); hash[31] = h7;\n"
+"    hash[32] = 0;\n"
 "    \n"
 "    // Base32 encode and compare prefix\n"
 "    uint prefix_len = params->prefix_len;\n"
@@ -182,12 +185,13 @@ typedef struct {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLComputePipelineState> pipeline;
-    id<MTLBuffer> destBuf;
+    id<MTLBuffer> staticWBuf;
     id<MTLBuffer> paramsBuf;
     id<MTLBuffer> matchFoundBuf;
     id<MTLBuffer> matchCounterBuf;
     NSUInteger batchSize;
     NSUInteger maxThreadsPerGroup;
+    NSUInteger threadExecutionWidth;
 } MetalWorker;
 
 // Packed to match shader struct
@@ -195,6 +199,7 @@ typedef struct __attribute__((packed)) {
     uint64_t counter_base;
     uint32_t prefix_len;
     char prefix[64];
+    uint32_t block0_words[14];
 } VanityParams;
 
 int metalAvailable(void) {
@@ -235,6 +240,8 @@ char** metalListDevices(int* count) {
 void* metalNewWorker(int deviceIndex, const unsigned char* destTemplate,
                      const char* prefix, int prefixLen, unsigned long batchSize) {
     @autoreleasepool {
+        if (batchSize == 0) return NULL;
+
         // Get device
         id<MTLDevice> device = nil;
         NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
@@ -248,7 +255,6 @@ void* metalNewWorker(int deviceIndex, const unsigned char* destTemplate,
         // Compile shader
         NSError* error = nil;
         MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
-        options.fastMathEnabled = YES;
         id<MTLLibrary> library = [device newLibraryWithSource:shaderSource options:options error:&error];
         if (library == nil) {
             NSLog(@"Metal shader compile error: %@", error);
@@ -271,16 +277,40 @@ void* metalNewWorker(int deviceIndex, const unsigned char* destTemplate,
         id<MTLCommandQueue> queue = [device newCommandQueue];
         if (queue == nil) return NULL;
 
-        // Create buffers
-        id<MTLBuffer> destBuf = [device newBufferWithBytes:destTemplate
-                                                    length:391
-                                                   options:MTLResourceStorageModeShared];
-
         VanityParams params;
         memset(&params, 0, sizeof(params));
         params.counter_base = 0;
         params.prefix_len = (uint32_t)prefixLen;
-        memcpy(params.prefix, prefix, prefixLen < 64 ? prefixLen : 63);
+        size_t prefixCopyLen = (size_t)(prefixLen < 64 ? prefixLen : 64);
+        memcpy(params.prefix, prefix, prefixCopyLen);
+        for (int i = 0; i < 14; i++) {
+            params.block0_words[i] = readBE32Host(destTemplate + 8 + i*4);
+        }
+
+        uint32_t staticW[6][64];
+        for (int b = 0; b < 6; b++) {
+            unsigned char block[64];
+            memset(block, 0, sizeof(block));
+            if (b < 5) {
+                memcpy(block, destTemplate + (size_t)(b+1)*64, 64);
+            } else {
+                memcpy(block, destTemplate + 384, 7);
+                block[7] = 0x80;
+                block[62] = 0x0C;
+                block[63] = 0x38;
+            }
+            for (int i = 0; i < 16; i++) {
+                staticW[b][i] = readBE32Host(block + i*4);
+            }
+            for (int i = 16; i < 64; i++) {
+                staticW[b][i] = sig1_host(staticW[b][i-2]) + staticW[b][i-7] + sig0_host(staticW[b][i-15]) + staticW[b][i-16];
+            }
+        }
+
+        id<MTLBuffer> staticWBuf = [device newBufferWithBytes:staticW
+                                                       length:sizeof(staticW)
+                                                      options:MTLResourceStorageModeShared];
+        if (staticWBuf == nil) return NULL;
 
         id<MTLBuffer> paramsBuf = [device newBufferWithBytes:&params
                                                       length:sizeof(VanityParams)
@@ -301,18 +331,19 @@ void* metalNewWorker(int deviceIndex, const unsigned char* destTemplate,
         worker->device = device;
         worker->queue = queue;
         worker->pipeline = pipeline;
-        worker->destBuf = destBuf;
+        worker->staticWBuf = staticWBuf;
         worker->paramsBuf = paramsBuf;
         worker->matchFoundBuf = matchFoundBuf;
         worker->matchCounterBuf = matchCounterBuf;
         worker->batchSize = (NSUInteger)batchSize;
         worker->maxThreadsPerGroup = [pipeline maxTotalThreadsPerThreadgroup];
+        worker->threadExecutionWidth = [pipeline threadExecutionWidth];
 
         // Retain Objective-C objects
         CFRetain((__bridge CFTypeRef)device);
         CFRetain((__bridge CFTypeRef)queue);
         CFRetain((__bridge CFTypeRef)pipeline);
-        CFRetain((__bridge CFTypeRef)destBuf);
+        CFRetain((__bridge CFTypeRef)staticWBuf);
         CFRetain((__bridge CFTypeRef)paramsBuf);
         CFRetain((__bridge CFTypeRef)matchFoundBuf);
         CFRetain((__bridge CFTypeRef)matchCounterBuf);
@@ -343,14 +374,15 @@ unsigned long metalRunBatch(void* handle, unsigned long counterStart,
         if (encoder == nil) return 0;
 
         [encoder setComputePipelineState:worker->pipeline];
-        [encoder setBuffer:worker->destBuf offset:0 atIndex:0];
-        [encoder setBuffer:worker->paramsBuf offset:0 atIndex:1];
+        [encoder setBuffer:worker->paramsBuf offset:0 atIndex:0];
+        [encoder setBuffer:worker->staticWBuf offset:0 atIndex:1];
         [encoder setBuffer:worker->matchFoundBuf offset:0 atIndex:2];
         [encoder setBuffer:worker->matchCounterBuf offset:0 atIndex:3];
 
         // Calculate grid size
-        NSUInteger threadGroupSize = worker->maxThreadsPerGroup;
-        if (threadGroupSize > 256) threadGroupSize = 256;
+        NSUInteger threadGroupSize = bestThreadGroupSize(worker->maxThreadsPerGroup, worker->threadExecutionWidth);
+        if (threadGroupSize > worker->batchSize) threadGroupSize = worker->batchSize;
+        if (threadGroupSize == 0) return 0;
         MTLSize gridSize = MTLSizeMake(worker->batchSize, 1, 1);
         MTLSize groupSize = MTLSizeMake(threadGroupSize, 1, 1);
 
@@ -381,7 +413,7 @@ void metalFreeWorker(void* handle) {
         CFRelease((__bridge CFTypeRef)worker->matchCounterBuf);
         CFRelease((__bridge CFTypeRef)worker->matchFoundBuf);
         CFRelease((__bridge CFTypeRef)worker->paramsBuf);
-        CFRelease((__bridge CFTypeRef)worker->destBuf);
+        CFRelease((__bridge CFTypeRef)worker->staticWBuf);
         CFRelease((__bridge CFTypeRef)worker->pipeline);
         CFRelease((__bridge CFTypeRef)worker->queue);
         CFRelease((__bridge CFTypeRef)worker->device);
@@ -524,11 +556,13 @@ typedef struct {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLComputePipelineState> pipeline;
+    id<MTLBuffer> pubkeyBuf;
     id<MTLBuffer> paramsBuf;
     id<MTLBuffer> matchFoundBuf;
     id<MTLBuffer> matchIndexBuf;
     NSUInteger batchSize;
     NSUInteger maxThreadsPerGroup;
+    NSUInteger threadExecutionWidth;
 } MetalTorV3Worker;
 
 typedef struct __attribute__((packed)) {
@@ -540,6 +574,8 @@ typedef struct __attribute__((packed)) {
 void* metalNewTorV3Worker(int deviceIndex, const char* prefix, int prefixLen,
                           unsigned long batchSize) {
     @autoreleasepool {
+        if (batchSize == 0 || batchSize > UINT32_MAX) return NULL;
+
         id<MTLDevice> device = nil;
         NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
         if (devices != nil && [devices count] > 0 && deviceIndex < (int)[devices count]) {
@@ -551,7 +587,6 @@ void* metalNewTorV3Worker(int deviceIndex, const char* prefix, int prefixLen,
 
         NSError* error = nil;
         MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
-        options.fastMathEnabled = YES;
         id<MTLLibrary> library = [device newLibraryWithSource:torV3ShaderSource options:options error:&error];
         if (library == nil) {
             NSLog(@"Metal TorV3 shader compile error: %@", error);
@@ -577,7 +612,12 @@ void* metalNewTorV3Worker(int deviceIndex, const char* prefix, int prefixLen,
         memset(&params, 0, sizeof(params));
         params.key_count = 0;
         params.prefix_len = (uint32_t)prefixLen;
-        memcpy(params.prefix, prefix, prefixLen < 64 ? prefixLen : 63);
+        size_t prefixCopyLen = (size_t)(prefixLen < 64 ? prefixLen : 64);
+        memcpy(params.prefix, prefix, prefixCopyLen);
+
+        id<MTLBuffer> pubkeyBuf = [device newBufferWithLength:batchSize * 32
+                                                       options:(MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined)];
+        if (pubkeyBuf == nil) return NULL;
 
         id<MTLBuffer> paramsBuf = [device newBufferWithBytes:&params
                                                       length:sizeof(TorV3Params)
@@ -597,15 +637,18 @@ void* metalNewTorV3Worker(int deviceIndex, const char* prefix, int prefixLen,
         worker->device = device;
         worker->queue = queue;
         worker->pipeline = pipeline;
+        worker->pubkeyBuf = pubkeyBuf;
         worker->paramsBuf = paramsBuf;
         worker->matchFoundBuf = matchFoundBuf;
         worker->matchIndexBuf = matchIndexBuf;
         worker->batchSize = (NSUInteger)batchSize;
         worker->maxThreadsPerGroup = [pipeline maxTotalThreadsPerThreadgroup];
+        worker->threadExecutionWidth = [pipeline threadExecutionWidth];
 
         CFRetain((__bridge CFTypeRef)device);
         CFRetain((__bridge CFTypeRef)queue);
         CFRetain((__bridge CFTypeRef)pipeline);
+        CFRetain((__bridge CFTypeRef)pubkeyBuf);
         CFRetain((__bridge CFTypeRef)paramsBuf);
         CFRetain((__bridge CFTypeRef)matchFoundBuf);
         CFRetain((__bridge CFTypeRef)matchIndexBuf);
@@ -620,12 +663,13 @@ unsigned long metalRunTorV3Batch(void* handle, const unsigned char* pubkeys,
     @autoreleasepool {
         MetalTorV3Worker* worker = (MetalTorV3Worker*)handle;
         if (!worker) return 0;
+        if (keyCount == 0 || keyCount > (unsigned long)worker->batchSize) return 0;
+        if (pubkeys == NULL) return 0;
+        if (keyCount > UINT32_MAX) return 0;
 
-        // Create pubkeys buffer from input data
-        id<MTLBuffer> pubkeyBuf = [worker->device newBufferWithBytes:pubkeys
-                                                              length:keyCount * 32
-                                                             options:MTLResourceStorageModeShared];
-        if (pubkeyBuf == nil) return 0;
+        void* pubkeyPtr = [worker->pubkeyBuf contents];
+        if (pubkeyPtr == NULL) return 0;
+        memcpy(pubkeyPtr, pubkeys, keyCount * 32);
 
         // Update params
         TorV3Params* params = (TorV3Params*)[worker->paramsBuf contents];
@@ -642,13 +686,14 @@ unsigned long metalRunTorV3Batch(void* handle, const unsigned char* pubkeys,
         if (encoder == nil) return 0;
 
         [encoder setComputePipelineState:worker->pipeline];
-        [encoder setBuffer:pubkeyBuf offset:0 atIndex:0];
+        [encoder setBuffer:worker->pubkeyBuf offset:0 atIndex:0];
         [encoder setBuffer:worker->paramsBuf offset:0 atIndex:1];
         [encoder setBuffer:worker->matchFoundBuf offset:0 atIndex:2];
         [encoder setBuffer:worker->matchIndexBuf offset:0 atIndex:3];
 
-        NSUInteger threadGroupSize = worker->maxThreadsPerGroup;
-        if (threadGroupSize > 256) threadGroupSize = 256;
+        NSUInteger threadGroupSize = bestThreadGroupSize(worker->maxThreadsPerGroup, worker->threadExecutionWidth);
+        if (threadGroupSize > keyCount) threadGroupSize = (NSUInteger)keyCount;
+        if (threadGroupSize == 0) return 0;
         MTLSize gridSize = MTLSizeMake(keyCount, 1, 1);
         MTLSize groupSize = MTLSizeMake(threadGroupSize, 1, 1);
 
@@ -675,6 +720,7 @@ void metalFreeTorV3Worker(void* handle) {
         MetalTorV3Worker* worker = (MetalTorV3Worker*)handle;
         if (!worker) return;
 
+        CFRelease((__bridge CFTypeRef)worker->pubkeyBuf);
         CFRelease((__bridge CFTypeRef)worker->matchIndexBuf);
         CFRelease((__bridge CFTypeRef)worker->matchFoundBuf);
         CFRelease((__bridge CFTypeRef)worker->paramsBuf);

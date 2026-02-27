@@ -12,18 +12,20 @@ import (
 	"strings"
 
 	"filippo.io/edwards25519"
+	"github.com/go-i2p/i2p-vanitygen/internal/base32check"
 	"golang.org/x/crypto/sha3"
 )
 
-var onionEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+var onionEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+var torV3ChecksumPrefix = [15]byte{'.', 'o', 'n', 'i', 'o', 'n', ' ', 'c', 'h', 'e', 'c', 'k', 's', 'u', 'm'}
 
 // TorV3Scheme implements Scheme for Tor v3 .onion addresses.
 type TorV3Scheme struct{}
 
-func (TorV3Scheme) Network() Network   { return NetworkTorV3 }
-func (TorV3Scheme) Suffix() string     { return ".onion" }
-func (TorV3Scheme) MaxPrefixLen() int  { return 56 }
-func (TorV3Scheme) SupportsGPU() bool  { return true }
+func (TorV3Scheme) Network() Network  { return NetworkTorV3 }
+func (TorV3Scheme) Suffix() string    { return ".onion" }
+func (TorV3Scheme) MaxPrefixLen() int { return 56 }
+func (TorV3Scheme) SupportsGPU() bool { return true }
 
 func (TorV3Scheme) ValidatePrefix(prefix string) error {
 	if len(prefix) == 0 {
@@ -60,12 +62,12 @@ func (TorV3Scheme) NewCandidate() (Candidate, error) {
 // It supports fast iteration via scalar/point addition on the curve.
 type TorV3Candidate struct {
 	// Base key material (from initial keygen)
-	seed        [32]byte // original Ed25519 seed
-	hashSuffix  [32]byte // second half of SHA-512(seed), needed for Tor key file
+	seed       [32]byte // original Ed25519 seed
+	hashSuffix [32]byte // second half of SHA-512(seed), needed for Tor key file
 
 	// Current derived key (updated each iteration)
-	scalar *edwards25519.Scalar // current private scalar
-	point  *edwards25519.Point  // current public key point
+	scalar  *edwards25519.Scalar // current private scalar
+	point   *edwards25519.Point  // current public key point
 	counter uint64
 
 	// Precomputed
@@ -111,20 +113,9 @@ func NewTorV3Candidate() (*TorV3Candidate, error) {
 
 // Address returns the 56-character base32 onion address (without .onion suffix).
 func (c *TorV3Candidate) Address() string {
-	pubBytes := c.point.Bytes()
-
-	// Build the 35-byte onion address payload:
-	// pubkey (32) | checksum (2) | version (1)
 	var payload [35]byte
-	copy(payload[:32], pubBytes)
-
-	// Checksum = SHA3-256(".onion checksum" | pubkey | version)[:2]
-	checksum := torV3Checksum(pubBytes)
-	payload[32] = checksum[0]
-	payload[33] = checksum[1]
-	payload[34] = 0x03 // version
-
-	return strings.ToLower(onionEncoding.EncodeToString(payload[:]))
+	c.buildAddressPayload(&payload)
+	return onionEncoding.EncodeToString(payload[:])
 }
 
 // FullAddress returns the complete .onion address.
@@ -153,7 +144,18 @@ func (c *TorV3Candidate) AdvanceBy(n uint64) {
 
 // CheckPrefix checks whether the current address starts with the given prefix.
 func (c *TorV3Candidate) CheckPrefix(prefix string) bool {
-	return strings.HasPrefix(c.Address(), prefix)
+	var payload [35]byte
+	c.buildAddressPayload(&payload)
+	return base32check.HasPrefixLowerNoPad(payload[:], prefix)
+}
+
+func (c *TorV3Candidate) buildAddressPayload(payload *[35]byte) {
+	pubBytes := c.point.Bytes()
+	copy(payload[:32], pubBytes)
+	checksum := torV3Checksum(pubBytes)
+	payload[32] = checksum[0]
+	payload[33] = checksum[1]
+	payload[34] = 0x03
 }
 
 // SaveKeys writes the Tor hidden service key files to a directory.
@@ -228,11 +230,10 @@ func (c *TorV3Candidate) ExpandedPrivateKey() ed25519.PrivateKey {
 
 // torV3Checksum computes the 2-byte checksum for a Tor v3 onion address.
 func torV3Checksum(pubkey []byte) [2]byte {
-	// SHA3-256(".onion checksum" | pubkey | version)
-	h := sha3.New256()
-	h.Write([]byte(".onion checksum"))
-	h.Write(pubkey[:32])
-	h.Write([]byte{0x03})
-	sum := h.Sum(nil)
+	var input [48]byte
+	copy(input[:15], torV3ChecksumPrefix[:])
+	copy(input[15:47], pubkey[:32])
+	input[47] = 0x03
+	sum := sha3.Sum256(input[:])
 	return [2]byte{sum[0], sum[1]}
 }

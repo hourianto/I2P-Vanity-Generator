@@ -97,6 +97,12 @@ func NewTorV3Worker(cfg TorV3WorkerConfig) (*TorV3Worker, error) {
 	if !Available() {
 		return nil, fmt.Errorf("no Metal GPU available")
 	}
+	if cfg.BatchSize == 0 {
+		return nil, fmt.Errorf("invalid Tor v3 batch size: %d", cfg.BatchSize)
+	}
+	if len(cfg.Prefix) == 0 || len(cfg.Prefix) > 56 {
+		return nil, fmt.Errorf("invalid Tor v3 prefix length: %d", len(cfg.Prefix))
+	}
 
 	cPrefix := C.CString(cfg.Prefix)
 	defer C.free(unsafe.Pointer(cPrefix))
@@ -121,6 +127,14 @@ type metalTorV3Worker struct {
 }
 
 func (w *metalTorV3Worker) runBatch(pubkeys []byte, keyCount uint64) (BatchResult, error) {
+	if keyCount == 0 {
+		return BatchResult{}, fmt.Errorf("invalid Tor v3 key count: 0")
+	}
+	need := keyCount * 32
+	if uint64(len(pubkeys)) < need {
+		return BatchResult{}, fmt.Errorf("insufficient pubkey buffer: have %d, need %d", len(pubkeys), need)
+	}
+
 	var matchFound C.int
 	var matchIndex C.ulong
 

@@ -392,28 +392,45 @@ void* oclNewWorker(int deviceIndex, const unsigned char* destTemplate,
         return NULL;
     }
 
-    cl_mem destBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                    391, (void*)destTemplate, &err);
-    cl_mem prefixBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                      prefixLen, (void*)prefix, &err);
+    cl_mem destBuf = NULL;
+    cl_mem prefixBuf = NULL;
+    cl_mem matchFoundBuf = NULL;
+    cl_mem matchCounterBuf = NULL;
+
+    destBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                             391, (void*)destTemplate, &err);
+    if (err != CL_SUCCESS || destBuf == NULL) goto fail;
+
+    prefixBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                               prefixLen, (void*)prefix, &err);
+    if (err != CL_SUCCESS || prefixBuf == NULL) goto fail;
 
     int zero = 0;
-    cl_mem matchFoundBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                                          sizeof(int), &zero, &err);
+    matchFoundBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                   sizeof(int), &zero, &err);
+    if (err != CL_SUCCESS || matchFoundBuf == NULL) goto fail;
+
     cl_ulong zeroCounter = 0;
-    cl_mem matchCounterBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                                            sizeof(cl_ulong), &zeroCounter, &err);
+    matchCounterBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                     sizeof(cl_ulong), &zeroCounter, &err);
+    if (err != CL_SUCCESS || matchCounterBuf == NULL) goto fail;
 
     // Set static kernel args
-    clSetKernelArg(kern, 0, sizeof(cl_mem), &destBuf);
+    err = clSetKernelArg(kern, 0, sizeof(cl_mem), &destBuf);
+    if (err != CL_SUCCESS) goto fail;
     // arg 1 (counter_base) set per batch
     cl_uint pl = (cl_uint)prefixLen;
-    clSetKernelArg(kern, 2, sizeof(cl_uint), &pl);
-    clSetKernelArg(kern, 3, sizeof(cl_mem), &prefixBuf);
-    clSetKernelArg(kern, 4, sizeof(cl_mem), &matchFoundBuf);
-    clSetKernelArg(kern, 5, sizeof(cl_mem), &matchCounterBuf);
+    err = clSetKernelArg(kern, 2, sizeof(cl_uint), &pl);
+    if (err != CL_SUCCESS) goto fail;
+    err = clSetKernelArg(kern, 3, sizeof(cl_mem), &prefixBuf);
+    if (err != CL_SUCCESS) goto fail;
+    err = clSetKernelArg(kern, 4, sizeof(cl_mem), &matchFoundBuf);
+    if (err != CL_SUCCESS) goto fail;
+    err = clSetKernelArg(kern, 5, sizeof(cl_mem), &matchCounterBuf);
+    if (err != CL_SUCCESS) goto fail;
 
     OpenCLWorker* w = (OpenCLWorker*)calloc(1, sizeof(OpenCLWorker));
+    if (w == NULL) goto fail;
     w->context = ctx;
     w->queue = queue;
     w->kernel = kern;
@@ -425,6 +442,17 @@ void* oclNewWorker(int deviceIndex, const unsigned char* destTemplate,
     w->batchSize = (cl_ulong)batchSize;
     w->prefixLen = prefixLen;
     return w;
+
+fail:
+    if (matchCounterBuf) clReleaseMemObject(matchCounterBuf);
+    if (matchFoundBuf) clReleaseMemObject(matchFoundBuf);
+    if (prefixBuf) clReleaseMemObject(prefixBuf);
+    if (destBuf) clReleaseMemObject(destBuf);
+    clReleaseKernel(kern);
+    clReleaseProgram(prog);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(ctx);
+    return NULL;
 }
 
 unsigned long oclRunBatch(void* handle, unsigned long counterStart,
@@ -434,24 +462,29 @@ unsigned long oclRunBatch(void* handle, unsigned long counterStart,
 
     // Reset match_found
     int zero = 0;
-    clEnqueueWriteBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0, sizeof(int), &zero, 0, NULL, NULL);
+    cl_int err = clEnqueueWriteBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0, sizeof(int), &zero, 0, NULL, NULL);
+    if (err != CL_SUCCESS) return 0;
 
     // Set counter_base arg
     cl_ulong cb = (cl_ulong)counterStart;
-    clSetKernelArg(w->kernel, 1, sizeof(cl_ulong), &cb);
+    err = clSetKernelArg(w->kernel, 1, sizeof(cl_ulong), &cb);
+    if (err != CL_SUCCESS) return 0;
 
     // Dispatch
     size_t globalSize = (size_t)w->batchSize;
-    cl_int err = clEnqueueNDRangeKernel(w->queue, w->kernel, 1, NULL, &globalSize, NULL, 0, NULL, NULL);
+    err = clEnqueueNDRangeKernel(w->queue, w->kernel, 1, NULL, &globalSize, NULL, 0, NULL, NULL);
     if (err != CL_SUCCESS) return 0;
 
-    clFinish(w->queue);
+    err = clFinish(w->queue);
+    if (err != CL_SUCCESS) return 0;
 
     // Read results
     int mf = 0;
     cl_ulong mc = 0;
-    clEnqueueReadBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0, sizeof(int), &mf, 0, NULL, NULL);
-    clEnqueueReadBuffer(w->queue, w->matchCounterBuf, CL_TRUE, 0, sizeof(cl_ulong), &mc, 0, NULL, NULL);
+    err = clEnqueueReadBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0, sizeof(int), &mf, 0, NULL, NULL);
+    if (err != CL_SUCCESS) return 0;
+    err = clEnqueueReadBuffer(w->queue, w->matchCounterBuf, CL_TRUE, 0, sizeof(cl_ulong), &mc, 0, NULL, NULL);
+    if (err != CL_SUCCESS) return 0;
 
     *matchFound = mf;
     *matchCounter = (unsigned long)mc;
@@ -525,29 +558,45 @@ void* oclNewTorV3Worker(int deviceIndex, const char* prefix, int prefixLen,
         return NULL;
     }
 
+    cl_mem pubkeyBuf = NULL;
+    cl_mem prefixBuf = NULL;
+    cl_mem matchFoundBuf = NULL;
+    cl_mem matchIndexBuf = NULL;
+
     // Allocate pubkey buffer (batchSize * 32 bytes)
-    cl_mem pubkeyBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY,
-                                       batchSize * 32, NULL, &err);
-    cl_mem prefixBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                       prefixLen, (void*)prefix, &err);
+    pubkeyBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY, batchSize * 32, NULL, &err);
+    if (err != CL_SUCCESS || pubkeyBuf == NULL) goto fail;
+
+    prefixBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                               prefixLen, (void*)prefix, &err);
+    if (err != CL_SUCCESS || prefixBuf == NULL) goto fail;
 
     int zero = 0;
-    cl_mem matchFoundBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                                           sizeof(int), &zero, &err);
+    matchFoundBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                   sizeof(int), &zero, &err);
+    if (err != CL_SUCCESS || matchFoundBuf == NULL) goto fail;
+
     cl_ulong zeroIdx = 0;
-    cl_mem matchIndexBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                                           sizeof(cl_ulong), &zeroIdx, &err);
+    matchIndexBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                   sizeof(cl_ulong), &zeroIdx, &err);
+    if (err != CL_SUCCESS || matchIndexBuf == NULL) goto fail;
 
     // Set static kernel args
-    clSetKernelArg(kern, 0, sizeof(cl_mem), &pubkeyBuf);
+    err = clSetKernelArg(kern, 0, sizeof(cl_mem), &pubkeyBuf);
+    if (err != CL_SUCCESS) goto fail;
     // arg 1 (key_count) set per batch
     cl_uint pl = (cl_uint)prefixLen;
-    clSetKernelArg(kern, 2, sizeof(cl_uint), &pl);
-    clSetKernelArg(kern, 3, sizeof(cl_mem), &prefixBuf);
-    clSetKernelArg(kern, 4, sizeof(cl_mem), &matchFoundBuf);
-    clSetKernelArg(kern, 5, sizeof(cl_mem), &matchIndexBuf);
+    err = clSetKernelArg(kern, 2, sizeof(cl_uint), &pl);
+    if (err != CL_SUCCESS) goto fail;
+    err = clSetKernelArg(kern, 3, sizeof(cl_mem), &prefixBuf);
+    if (err != CL_SUCCESS) goto fail;
+    err = clSetKernelArg(kern, 4, sizeof(cl_mem), &matchFoundBuf);
+    if (err != CL_SUCCESS) goto fail;
+    err = clSetKernelArg(kern, 5, sizeof(cl_mem), &matchIndexBuf);
+    if (err != CL_SUCCESS) goto fail;
 
     OpenCLTorV3Worker* w = (OpenCLTorV3Worker*)calloc(1, sizeof(OpenCLTorV3Worker));
+    if (w == NULL) goto fail;
     w->context = ctx;
     w->queue = queue;
     w->kernel = kern;
@@ -559,6 +608,17 @@ void* oclNewTorV3Worker(int deviceIndex, const char* prefix, int prefixLen,
     w->batchSize = (cl_ulong)batchSize;
     w->prefixLen = prefixLen;
     return w;
+
+fail:
+    if (matchIndexBuf) clReleaseMemObject(matchIndexBuf);
+    if (matchFoundBuf) clReleaseMemObject(matchFoundBuf);
+    if (prefixBuf) clReleaseMemObject(prefixBuf);
+    if (pubkeyBuf) clReleaseMemObject(pubkeyBuf);
+    clReleaseKernel(kern);
+    clReleaseProgram(prog);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(ctx);
+    return NULL;
 }
 
 unsigned long oclRunTorV3Batch(void* handle, const unsigned char* pubkeys,
@@ -566,35 +626,42 @@ unsigned long oclRunTorV3Batch(void* handle, const unsigned char* pubkeys,
                                 int* matchFound, unsigned long* matchIndex) {
     OpenCLTorV3Worker* w = (OpenCLTorV3Worker*)handle;
     if (!w) return 0;
+    if (keyCount == 0 || keyCount > (unsigned long)w->batchSize) return 0;
 
     // Upload pubkeys
-    clEnqueueWriteBuffer(w->queue, w->pubkeyBuf, CL_TRUE, 0,
-                          keyCount * 32, pubkeys, 0, NULL, NULL);
+    cl_int err = clEnqueueWriteBuffer(w->queue, w->pubkeyBuf, CL_TRUE, 0,
+                                      keyCount * 32, pubkeys, 0, NULL, NULL);
+    if (err != CL_SUCCESS) return 0;
 
     // Reset match_found
     int zero = 0;
-    clEnqueueWriteBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0,
-                          sizeof(int), &zero, 0, NULL, NULL);
+    err = clEnqueueWriteBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0,
+                               sizeof(int), &zero, 0, NULL, NULL);
+    if (err != CL_SUCCESS) return 0;
 
     // Set key_count arg
     cl_uint kc = (cl_uint)keyCount;
-    clSetKernelArg(w->kernel, 1, sizeof(cl_uint), &kc);
+    err = clSetKernelArg(w->kernel, 1, sizeof(cl_uint), &kc);
+    if (err != CL_SUCCESS) return 0;
 
     // Dispatch
     size_t globalSize = (size_t)keyCount;
-    cl_int err = clEnqueueNDRangeKernel(w->queue, w->kernel, 1, NULL,
-                                         &globalSize, NULL, 0, NULL, NULL);
+    err = clEnqueueNDRangeKernel(w->queue, w->kernel, 1, NULL,
+                                 &globalSize, NULL, 0, NULL, NULL);
     if (err != CL_SUCCESS) return 0;
 
-    clFinish(w->queue);
+    err = clFinish(w->queue);
+    if (err != CL_SUCCESS) return 0;
 
     // Read results
     int mf = 0;
     cl_ulong mi = 0;
-    clEnqueueReadBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0,
-                         sizeof(int), &mf, 0, NULL, NULL);
-    clEnqueueReadBuffer(w->queue, w->matchIndexBuf, CL_TRUE, 0,
-                         sizeof(cl_ulong), &mi, 0, NULL, NULL);
+    err = clEnqueueReadBuffer(w->queue, w->matchFoundBuf, CL_TRUE, 0,
+                              sizeof(int), &mf, 0, NULL, NULL);
+    if (err != CL_SUCCESS) return 0;
+    err = clEnqueueReadBuffer(w->queue, w->matchIndexBuf, CL_TRUE, 0,
+                              sizeof(cl_ulong), &mi, 0, NULL, NULL);
+    if (err != CL_SUCCESS) return 0;
 
     *matchFound = mf;
     *matchIndex = (unsigned long)mi;
@@ -705,6 +772,12 @@ func NewTorV3Worker(cfg TorV3WorkerConfig) (*TorV3Worker, error) {
 	if !Available() {
 		return nil, fmt.Errorf("no OpenCL GPU available")
 	}
+	if cfg.BatchSize == 0 {
+		return nil, fmt.Errorf("invalid Tor v3 batch size: %d", cfg.BatchSize)
+	}
+	if len(cfg.Prefix) == 0 || len(cfg.Prefix) > 56 {
+		return nil, fmt.Errorf("invalid Tor v3 prefix length: %d", len(cfg.Prefix))
+	}
 
 	cPrefix := C.CString(cfg.Prefix)
 	defer C.free(unsafe.Pointer(cPrefix))
@@ -729,6 +802,14 @@ type openclTorV3Worker struct {
 }
 
 func (w *openclTorV3Worker) runBatch(pubkeys []byte, keyCount uint64) (BatchResult, error) {
+	if keyCount == 0 {
+		return BatchResult{}, fmt.Errorf("invalid Tor v3 key count: 0")
+	}
+	need := keyCount * 32
+	if uint64(len(pubkeys)) < need {
+		return BatchResult{}, fmt.Errorf("insufficient pubkey buffer: have %d, need %d", len(pubkeys), need)
+	}
+
 	var matchFound C.int
 	var matchIndex C.ulong
 

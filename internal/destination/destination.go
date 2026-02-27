@@ -9,20 +9,22 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/go-i2p/i2p-vanitygen/internal/base32check"
 )
 
 const (
-	EncryptionKeySize  = 256
-	SigningKeyPadding   = 96
-	SigningKeySize      = 128
-	Ed25519PubKeySize  = 32
-	CertificateSize    = 7
-	DestinationSize    = EncryptionKeySize + SigningKeySize + CertificateSize // 391
+	EncryptionKeySize = 256
+	SigningKeyPadding = 96
+	SigningKeySize    = 128
+	Ed25519PubKeySize = 32
+	CertificateSize   = 7
+	DestinationSize   = EncryptionKeySize + SigningKeySize + CertificateSize // 391
 
-	CertTypeKeyCert         = 5
-	CertPayloadLength       = 4
+	CertTypeKeyCert           = 5
+	CertPayloadLength         = 4
 	SigTypeEdDSASHA512Ed25519 = 7
-	CryptoTypeElGamal       = 0
+	CryptoTypeElGamal         = 0
 )
 
 var b32Encoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
@@ -84,6 +86,12 @@ func NewRandom() (*Destination, error) {
 func (d *Destination) B32Address() string {
 	hash := sha256.Sum256(d.Raw[:])
 	return b32Encoding.EncodeToString(hash[:])
+}
+
+// HasB32Prefix reports whether the destination's base32 address starts with prefix.
+func (d *Destination) HasB32Prefix(prefix string) bool {
+	hash := sha256.Sum256(d.Raw[:])
+	return base32check.HasPrefixLowerNoPad(hash[:], prefix)
 }
 
 // FullB32Address returns the complete .b32.i2p address.

@@ -233,6 +233,16 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 
 		// CPU precompute: advance through keys and collect pubkeys
 		for i := uint64(0); i < batchSize; i++ {
+			if i%1024 == 0 {
+				if found.Load() {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+			}
 			copy(buf[i*32:(i+1)*32], cand.PublicKeyBytes())
 			cand.Advance()
 		}
@@ -282,27 +292,39 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 	baseCounter := uint64(workerID) << 48
 	counter := baseCounter
 	batchSize := uint64(1024)
+	localChecked := uint64(0)
+	flushChecked := func() uint64 {
+		if localChecked == 0 {
+			return totalChecked.Load()
+		}
+		attempts := totalChecked.Add(localChecked)
+		localChecked = 0
+		return attempts
+	}
 
 	for {
 		if found.Load() {
+			flushChecked()
 			return
 		}
 		if (counter-baseCounter)%batchSize == 0 {
 			select {
 			case <-ctx.Done():
+				flushChecked()
 				return
 			default:
 			}
 		}
 
 		if i2pCand.MutateAndCheck(counter, g.prefix) {
-			totalChecked.Add(1)
+			localChecked++
+			attempts := flushChecked()
 			counter++
 			if found.CompareAndSwap(false, true) {
 				resultCh <- Result{
 					Candidate: i2pCand,
 					Address:   i2pCand.FullAddress(),
-					Attempts:  totalChecked.Load(),
+					Attempts:  attempts,
 					Duration:  time.Since(startTime),
 				}
 			}
@@ -310,7 +332,10 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 		}
 
 		counter++
-		totalChecked.Add(1)
+		localChecked++
+		if localChecked >= batchSize {
+			flushChecked()
+		}
 	}
 }
 
@@ -327,27 +352,39 @@ func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked 
 
 	batchSize := uint64(1024)
 	checked := uint64(0)
+	localChecked := uint64(0)
+	flushChecked := func() uint64 {
+		if localChecked == 0 {
+			return totalChecked.Load()
+		}
+		attempts := totalChecked.Add(localChecked)
+		localChecked = 0
+		return attempts
+	}
 
 	for {
 		if found.Load() {
+			flushChecked()
 			return
 		}
 		if checked%batchSize == 0 {
 			select {
 			case <-ctx.Done():
+				flushChecked()
 				return
 			default:
 			}
 		}
 
 		if cand.CheckPrefix(g.prefix) {
-			totalChecked.Add(1)
+			localChecked++
 			checked++
+			attempts := flushChecked()
 			if found.CompareAndSwap(false, true) {
 				resultCh <- Result{
 					Candidate: cand,
 					Address:   cand.FullAddress(),
-					Attempts:  totalChecked.Load(),
+					Attempts:  attempts,
 					Duration:  time.Since(startTime),
 				}
 			}
@@ -356,6 +393,9 @@ func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked 
 
 		cand.Advance()
 		checked++
-		totalChecked.Add(1)
+		localChecked++
+		if localChecked >= batchSize {
+			flushChecked()
+		}
 	}
 }

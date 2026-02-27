@@ -1,20 +1,16 @@
 package address
 
-import (
-	"strings"
-
-	"github.com/go-i2p/i2p-vanitygen/internal/destination"
-)
+import "github.com/go-i2p/i2p-vanitygen/internal/destination"
 
 // I2PScheme implements Scheme for I2P .b32.i2p addresses.
 type I2PScheme struct{}
 
-func (I2PScheme) Network() Network                        { return NetworkI2P }
-func (I2PScheme) Suffix() string                          { return ".b32.i2p" }
-func (I2PScheme) ValidatePrefix(prefix string) error      { return destination.ValidatePrefix(prefix) }
-func (I2PScheme) EstimateAttempts(n int) float64           { return destination.EstimateAttempts(n) }
-func (I2PScheme) MaxPrefixLen() int                        { return 52 }
-func (I2PScheme) SupportsGPU() bool                        { return true }
+func (I2PScheme) Network() Network                   { return NetworkI2P }
+func (I2PScheme) Suffix() string                     { return ".b32.i2p" }
+func (I2PScheme) ValidatePrefix(prefix string) error { return destination.ValidatePrefix(prefix) }
+func (I2PScheme) EstimateAttempts(n int) float64     { return destination.EstimateAttempts(n) }
+func (I2PScheme) MaxPrefixLen() int                  { return 52 }
+func (I2PScheme) SupportsGPU() bool                  { return true }
 
 func (I2PScheme) NewCandidate() (Candidate, error) {
 	d, err := destination.NewRandom()
@@ -29,14 +25,14 @@ type I2PCandidate struct {
 	Dest *destination.Destination
 }
 
-func (c *I2PCandidate) Address() string     { return c.Dest.B32Address() }
-func (c *I2PCandidate) FullAddress() string { return c.Dest.FullB32Address() }
+func (c *I2PCandidate) Address() string            { return c.Dest.B32Address() }
+func (c *I2PCandidate) FullAddress() string        { return c.Dest.FullB32Address() }
 func (c *I2PCandidate) SaveKeys(path string) error { return c.Dest.SaveKeys(path) }
 
 // MutateAndCheck mutates the encryption key with the given counter and checks the prefix.
 func (c *I2PCandidate) MutateAndCheck(counter uint64, prefix string) bool {
 	c.Dest.MutateEncryptionKey(counter)
-	return strings.HasPrefix(c.Dest.B32Address(), prefix)
+	return c.Dest.HasB32Prefix(prefix)
 }
 
 // Raw returns the raw destination bytes (needed for GPU worker template).
