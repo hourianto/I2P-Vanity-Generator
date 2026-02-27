@@ -132,18 +132,31 @@ jobs:
           echo "Verifying signature..."
           codesign -dv --verbose=2 "i2p-vanitygen-darwin-arm64"
 
-      - name: Notarize binary
+      - name: Create DMG
         run: |
-          zip "i2p-vanitygen-darwin-arm64.zip" "i2p-vanitygen-darwin-arm64"
-          xcrun notarytool submit "i2p-vanitygen-darwin-arm64.zip" \
+          mkdir -p dmg-staging
+          cp i2p-vanitygen-darwin-arm64 dmg-staging/
+          hdiutil create -volname "I2P Vanity Generator" \
+            -srcfolder dmg-staging \
+            -ov -format UDZO \
+            "i2p-vanitygen-darwin-arm64.dmg"
+
+      - name: Notarize DMG
+        run: |
+          xcrun notarytool submit "i2p-vanitygen-darwin-arm64.dmg" \
             --keychain-profile "i2p-notary" --wait
           echo "Notarization complete"
 
-      - name: Upload artifact
+      - name: Staple notarization ticket
+        run: xcrun stapler staple "i2p-vanitygen-darwin-arm64.dmg"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: i2p-vanitygen-darwin-arm64
-          path: i2p-vanitygen-darwin-arm64
+          path: |
+            i2p-vanitygen-darwin-arm64
+            i2p-vanitygen-darwin-arm64.dmg
 
   sign-linux:
     needs: build-linux
@@ -197,7 +210,7 @@ jobs:
           files: |
             artifacts/i2p-vanitygen-windows-amd64.exe
             artifacts/i2p-vanitygen-linux-amd64
-            artifacts/i2p-vanitygen-darwin-arm64
+            artifacts/i2p-vanitygen-darwin-arm64.dmg
 
       - name: Parse VirusTotal results
         id: vt_links
@@ -230,7 +243,7 @@ jobs:
             | Platform | Architecture | File | Signed |
             |----------|-------------|------|--------|
             | Windows | amd64 | `i2p-vanitygen-windows-amd64.exe` | Authenticode |
-            | macOS | arm64 (Apple Silicon) | `i2p-vanitygen-darwin-arm64` | Notarized |
+            | macOS | arm64 (Apple Silicon) | `i2p-vanitygen-darwin-arm64.dmg` | Notarized + Stapled |
             | Linux | amd64 | `i2p-vanitygen-linux-amd64` | PKCS#7 (`.p7s`) |
 
             ### VirusTotal Analysis
@@ -241,9 +254,9 @@ jobs:
 
             **Windows** — signature is embedded (right-click → Properties → Digital Signatures)
 
-            **macOS** — notarized with Apple:
+            **macOS** — notarized and stapled:
             ```
-            codesign -dv --verbose=2 i2p-vanitygen-darwin-arm64
+            spctl -a -t open --context context:primary-signature i2p-vanitygen-darwin-arm64.dmg
             ```
 
             **Linux** — verify the detached PKCS#7 signature:
